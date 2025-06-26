@@ -1,0 +1,12 @@
+{
+  "name": "pushStaging",
+  "version": "1.0.0",
+  "description": "Azure Function para recibir JSON y volcar a Azure SQL",
+  "main": "pushStaging/index.js",
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {
+    "mssql": "^10.0.0"
+  }
+}
