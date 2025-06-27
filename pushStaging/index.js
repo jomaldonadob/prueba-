@@ -22,7 +22,7 @@ module.exports = async function (context, req) {
 
     // Ejecutar INSERT parametrizado
     await sql.query`
-      INSERT INTO dbo.Staging (id, item, cost, owner_email, status)
+      INSERT INTO dbo.Primera (id, item, cost, owner_email, status)
       VALUES (${id}, ${item}, ${cost}, ${owner_email}, 'NEW')
     `;
 
