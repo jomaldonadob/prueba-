@@ -43,3 +43,26 @@ module.exports = async function (context, req) {
     await sql.close();
   }
 };
+
+// pushStaging ya la tienes; añade esto en pushStaging/index.js o en un archivo separado
+module.exports = async function(context, req) {
+  const sql = require('mssql');
+  // extrae email autenticado, ejemplo de Easy Auth header:
+  const principal = context.req.headers['x-ms-client-principal'];
+  const userEmail = JSON.parse(Buffer.from(principal, 'base64').toString()).userId;
+  
+  const config = { /* tus vars de entorno */ };
+  try {
+    await sql.connect(config);
+    const result = await sql.query`
+      SELECT id,item,cost,owner_email,status
+      FROM dbo.Staging
+      WHERE owner_email = ${userEmail}
+    `;
+    context.res = { status: 200, body: result.recordset };
+  } catch(e) {
+    context.res = { status: 500, body: e.message };
+  } finally {
+    await sql.close();
+  }
+};
