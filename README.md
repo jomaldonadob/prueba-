@@ -411,8 +411,8 @@ En el portal de Azure, dentro de tu Function App **probando22**, verás en **Con
 
 | Nombre                                  | Valor                                     |
 | --------------------------------------- | ----------------------------------------- |
-| DB\_USER                                | jomaldonadob@…                            |
-| DB\_PASS                                | Maldo20774.                               |
+| DB\_USER                                | xxxxxxxxxxxx@…                            |
+| DB\_PASS                                | Password                                  |
 | DB\_SERVER                              | pruebas-jomaldonadob.database.windows.net |
 | DB\_NAME                                | mi-sql-server-appsheet                    |
 | AzureWebJobsStorage                     | …                                         |
