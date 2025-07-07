@@ -140,6 +140,198 @@ Se eligió **Azure SQL Database** principalmente por su integración con el ecos
 
 * Es una opción viable y AppSheet la soporta, pero implica usar un *Database-as-a-Service* distinto (p.ej. en Google Cloud SQL o Amazon RDS) y tendría que configurar conexiones desde Azure Functions a otro proveedor.
 * Podría ser más económico en cuanto a licencias, pero no cambió la decisión aquí.
+Integración Google Sheets – Azure Functions – Azure SQL
+En este proyecto se crea un visor de datos en Google Sheets que permite consultar y editar registros de una base de datos en Azure SQL sin guardar esos datos de forma persistente en la hoja. La lógica se implementa con un script de Google Apps Script que añade menús y botones en la hoja para Refrescar, Actualizar y Borrar datos, y llama a una función HTTP de Azure (implementada con Azure Functions y Node.js) que inserta o consulta registros en la base de datos. A continuación se detalla cada componente y el flujo completo del sistema.
+Script de Apps Script y visor de datos en Google Sheets
+Figura: Interfaz en Google Sheets que actúa como “visor” de datos. Se muestran botones para Refrescar Datos, Actualizar y Borrar. Al activarlos, el script carga los registros desde Azure, permite editarlos y luego envía los cambios al servidor. El script de Apps Script asociado a la hoja de cálculo define varias funciones claves. En una estructura típica, incluiría:
+Una función onOpen(e) que se ejecuta al abrir la hoja y crea un menú o botones personalizados en la UI. Por ejemplo, con SpreadsheetApp.getUi().createMenu('Mi Menú')…addItem('Refrescar Datos', 'refrescarDatos') se añaden opciones que ejecutan otras funciones del script. Esta línea permite que el usuario ejecute acciones con un clic desde la barra de menús
+help.autodesk.com
+.
+Una función refrescarDatos() que obtiene registros de Azure. Esta función usaría UrlFetchApp.fetch(url, options) o SpreadsheetApp.flush() para hacer una solicitud HTTP POST al endpoint de Azure Functions, proporcionando parámetros (por ejemplo, el correo del usuario) en JSON. Al recibir la respuesta (un array de objetos JSON con los campos id, item, cost, owner_email, status), recorre esos datos y los inserta en la hoja (p.ej. con setValues en el rango correspondiente).
+Una función actualizarDatos() que envía los cambios hechos en la hoja de vuelta a la base de datos. Por ejemplo, tras editar los campos de una fila y pulsar “Actualizar”, el script extrae los valores modificados y envía otro UrlFetchApp.fetch() al mismo o a otro endpoint de Azure (en este caso, el endpoint HTTP definido) para insertar o actualizar esos registros en Azure SQL.
+Una función borrarDatos() que limpia la hoja de cálculo (por ejemplo, sheet.clearContents()) para eliminar la visualización actual de datos. Esto refuerza que no se almacena información permanentemente en la hoja: cada vez que se “refresca” se reemplazan todos los datos, y los cambios se persisten sólo en la base de datos de Azure, no en la hoja local.
+Lógica “sin almacenar permanentemente”: El script actúa como visor o interfaz temporal. Al refrescar, carga los datos desde la base de datos y los muestra en la hoja; al actualizar, envía los cambios y limpia la hoja. De este modo, la hoja de cálculo no mantiene un registro histórico de datos: siempre refleja la consulta más reciente y los cambios pendientes se envían al servidor, pero nunca se guardan localmente como copia permanente. Esto evita duplicar datos y asegura que la fuente única de verdad sea la base de datos en Azure, tal como recomiendan las buenas prácticas (una hoja de cálculo no debe usarse como BD persistente). Además, tras enviar los cambios al servidor se puede borrar o ocultar los datos en la hoja para reforzar esta idea de “visibilidad temporal”. A continuación se muestra una explicación línea por línea de un posible script de Apps Script (pseudocódigo comentado):
+js
+Copiar
+Editar
+function onOpen(e) {
+  // Al abrir la hoja, agregar opciones en el menú personalizado
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Gestión BD')
+    .addItem('Refrescar Datos', 'refrescarDatos')
+    .addItem('Actualizar Cambios', 'actualizarDatos')
+    .addItem('Borrar Datos', 'borrarDatos')
+    .addToUi();
+}
+
+function refrescarDatos() {
+  // Bloquear ejecución concurrente para evitar conflictos (LockService)
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30000)) {
+    SpreadsheetApp.getUi().alert('Otro usuario está refrescando datos. Intente de nuevo más tarde.');
+    return;
+  }
+  try {
+    // Obtener email u otra clave de usuario, si se usa autenticación
+    const email = Session.getActiveUser().getEmail();
+    // Llamar al Azure Function para obtener registros (método POST)
+    const url = 'https://<tu_funcion_app>.azurewebsites.net/api/pushStaging?code=<tu_clave_funcion>';
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ userEmail: email })
+    };
+    const response = UrlFetchApp.fetch(url, options);
+    const data = JSON.parse(response.getContentText());
+    
+    // Escribir datos en la hoja (asumiendo encabezados en la fila 1)
+    const sheet = SpreadsheetApp.getActiveSheet();
+    sheet.getRange(2, 1, sheet.getMaxRows()-1, sheet.getMaxColumns()).clearContent();
+    if (data && data.length) {
+      const values = data.map(row => [row.id, row.item, row.cost, row.owner_email, row.status]);
+      sheet.getRange(2, 1, values.length, values[0].length).setValues(values);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function actualizarDatos() {
+  // Similar al anterior, usa LockService para evitar concurrencia
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30000)) {
+    SpreadsheetApp.getUi().alert('Otro usuario está actualizando datos. Intente de nuevo más tarde.');
+    return;
+  }
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const rows = sheet.getDataRange().getValues();
+    const headers = rows[0];
+    // Suponiendo campos 'id', 'item', 'cost', 'owner_email', 'status'
+    const email = Session.getActiveUser().getEmail();
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (row[0] && row[0] != '') {
+        // Construir objeto con los datos de la fila
+        const payload = {
+          id: row[0],
+          item: row[1],
+          cost: row[2],
+          owner_email: row[3],
+          status: row[4],
+          userEmail: email
+        };
+        const url = 'https://<tu_funcion_app>.azurewebsites.net/api/pushStaging?code=<tu_clave_funcion>';
+        const options = {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify(payload)
+        };
+        UrlFetchApp.fetch(url, options);
+      }
+    }
+    // Opcional: notificar éxito
+    SpreadsheetApp.getUi().alert('Los cambios se enviaron correctamente.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function borrarDatos() {
+  // Limpia la hoja (no se almacena nada localmente)
+  const sheet = SpreadsheetApp.getActiveSheet();
+  sheet.getRange(2, 1, sheet.getMaxRows()-1, sheet.getMaxColumns()).clearContent();
+}
+Cada línea del script anterior cumple una función:
+onOpen(e) configura el menú al abrir la hoja. Esto es un disparador simple que Google ejecuta automáticamente
+stackoverflow.com
+. Agrega ítems como “Refrescar Datos”, “Actualizar Cambios” y “Borrar Datos” a la interfaz.
+refrescarDatos() obtiene los registros desde Azure. Usa UrlFetchApp.fetch para llamar al endpoint HTTPS de la función con las credenciales necesarias (en ?code= se envía la clave de función, tema explicado más adelante). Una vez recibe la respuesta JSON, inserta los datos en la hoja con setValues. Notar que primero limpia cualquier dato previo para no guardar información antigua.
+actualizarDatos() recorre las filas de la hoja (excepto encabezados) y, por cada fila con datos, construye un objeto JSON con los campos y envía una solicitud HTTP POST al mismo endpoint de Azure para insertar ese registro en la base de datos. De nuevo limpia o notifica al final según convenga.
+borrarDatos() simplemente limpia la hoja de cálculo (quedando solo encabezados), asegurando que ningún dato quede almacenado en la hoja tras la operación.
+En resumen, el script actúa como visor de datos: carga la última versión de la información desde la base de datos de Azure y permite editarla, pero no mantiene esos datos en la hoja. Tras cada operación los datos se envían al servidor y pueden borrarse localmente. Esto evita duplicaciones y deja que la base de datos sea la fuente real de los registros.
+Propósito y funcionamiento del visor en Sheets
+El visor en Sheets funciona como una interfaz gráfica para los usuarios. Los datos siempre residen en Azure SQL; la hoja de cálculo sólo muestra una vista temporal. Este enfoque se eligió porque:
+Un solo punto de verdad: La base de datos Azure SQL garantiza integridad y persistencia (propiedades ACID), mientras que la hoja de cálculo no es adecuada como almacén de datos definitivo
+geeksforgeeks.org
+.
+Actualizaciones controladas: Al no guardar datos permanentemente, se obligan a los usuarios a enviar los cambios al backend cada vez, evitando discrepancias entre usuarios.
+Seguridad y escalabilidad: No divulgar directamente datos sensibles en la hoja y aprovechar las capacidades de manejo de concurrencia de la base de datos.
+Para evitar que la hoja almacene datos, el script siempre limpia o sobrescribe el contenido al refrescar o enviar cambios. Además, se podría usar PropertiesService o variables temporales si fuese necesario, pero en este caso la sincronización directa con la función hace que la hoja sea simplemente un contenedor de trabajo momentáneo.
+Repositorio prueba--main (Azure Functions)
+El repositorio prueba--main (cuyo contenido se adjunta en el ZIP proporcionado) contiene la implementación de la función de Azure Functions que recibe los datos desde la hoja y los inserta en Azure SQL. A continuación se analiza cada archivo:
+host.json: Archivo de configuración global del Function App. Aquí aparece "version": "2.0" y ajustes de logging para Application Insights. En particular, se habilita el muestreo de telemetría (samplingSettings) para Application Insights
+learn.microsoft.com
+. Este archivo no define lógica de la función, sino metadatos de la app (p.ej. registro de logs, nivel de compilación, etc.).
+package.json: Define el proyecto Node.js. Contiene el nombre pushStaging, descripción, punto de entrada (main: "pushStaging/index.js") y dependencias. En dependencies aparece "mssql": "^10.0.0", la biblioteca de Node que permite conectarse a SQL Server. También define el script "start": "func start" para iniciar localmente. En resumen, package.json prepara el entorno Node.js para la función.
+pushStaging/function.json: Este archivo configura el binding de la función Azure llamada pushStaging. Contiene:
+"authLevel": "function", lo que indica que la función requiere una clave de función para invocarse (es decir, no es anónima). Esto significa que al llamarla desde el script de Google, debe incluirse ?code=<tu_clave_de_funcion> en la URL de la solicitud
+learn.microsoft.com
+.
+"type": "httpTrigger", "direction": "in", "name": "req" y methods: [ "post" ]: la función se activa por HTTP (trigger) vía POST, recibiendo la petición en la variable req.
+"type": "http", "direction": "out", "name": "res": define la respuesta HTTP que se enviará de vuelta. En conjunto, esto establece que la función actúa como un endpoint HTTPS que recibe JSON mediante POST y devuelve una respuesta con cuerpo.
+pushStaging/index.js: Contiene el código Node.js de la función. Analizando las secciones relevantes:
+Al inicio se importa el módulo mssql (const sql = require('mssql');), que se usará para conectar con Azure SQL.
+Se exporta una función asíncrona module.exports = async function (context, req) { ... }. Dentro de esta función:
+Se lee la configuración de conexión desde las variables de entorno: DB_USER, DB_PASS, DB_SERVER y DB_NAME. Estas se deben definir en las Application Settings del Function App en Azure, de modo que el código no tenga credenciales hardcodeadas. La opción { encrypt: true, trustServerCertificate: false } obliga a usar conexión cifrada a la base de datos.
+Con un bloque try/catch/finally, se conecta a la base de datos: await sql.connect(config);.
+Se extraen los datos del cuerpo de la petición HTTP (req.body), específicamente los campos { id, item, cost, owner_email, status, userEmail }.
+Se ejecuta una consulta INSERT parametrizada usando template literals de mssql:
+js
+Copiar
+Editar
+await sql.query`
+  INSERT INTO dbo.Staging (id, item, cost, owner_email, status)
+  VALUES (${id}, ${item}, ${cost}, ${owner_email}, 'NEW')
+`;
+Esto inserta un nuevo registro en la tabla Staging. Nótese que fija el campo status a 'NEW'.
+Si la inserción es exitosa, la función responde con estatus 200 y mensaje "Inserción exitosa".
+En caso de error, se captura en catch(err) y se devuelve código 500 con el mensaje de error. Finalmente, en el bloque finally, se cierra la conexión con await sql.close();.
+Nota: El código incluye un fragmento posterior inacabado (// pushStaging ya la tienes; añade esto en pushStaging/index.js o en un a...), que parece ser un comentario instructivo no ejecutable. No afecta la función principal descrita.
+En conjunto, index.js implementa la lógica del endpoint pushStaging: recibe datos de una petición HTTP, se conecta a Azure SQL, inserta en la tabla Staging y retorna el resultado. Al desplegar este código en Azure Functions, se crea la API REST que la hoja de Google Apps Script puede invocar.
+Despliegue a Azure Functions desde Cloud Shell
+Para desplegar el repositorio a Azure, se utiliza el Azure Cloud Shell (una terminal de Azure en el navegador). El proceso es:
+Subir el ZIP al Cloud Shell: En el panel de Cloud Shell, se puede usar el ícono de subida para cargar el archivo ZIP (prueba--main.zip) a la cuenta de archivos conectada al Cloud Shell (que persiste entre sesiones)
+learn.microsoft.com
+. Alternativamente se puede montar un repositorio Git o clonar código. En este caso, asumimos que subimos el ZIP al directorio home o a la unidad conectada.
+Descomprimir/Preparar (opcional): Aunque no es estrictamente necesario, se puede descomprimir el zip en el Cloud Shell para inspección. De hecho, es posible publicar el ZIP directamente sin descomprimir porque la herramienta de despliegue lo extrae en el sitio web de funciones.
+Configurar Azure Functions App: Debe existir previamente una Azure Function App creada (p.ej. mediante ARM, portal o CLI). Se requiere conocer el resource group y el nombre de la Function App. Las variables de entorno (DB_USER, DB_PASS, etc.) también deben establecerse en la configuración de la Function App (Azure Portal → Configuración de la aplicación).
+Desplegar por ZIP: Usando Azure CLI, se ejecuta el comando de zip deploy:
+lua
+Copiar
+Editar
+az functionapp deployment source config-zip \
+  --resource-group <GRUPO_RECURSOS> \
+  --name <NOMBRE_APP> \
+  --src <ruta_al_zip>
+Esto envía el ZIP y actualiza el contenido de la Function App. Durante el despliegue, Azure elimina archivos antiguos y los reemplaza con los del ZIP
+learn.microsoft.com
+learn.microsoft.com
+. En Cloud Shell, <ruta_al_zip> sería la ubicación dentro de la unidad persistente (por ejemplo /home/<usuario>/prueba--main.zip). Tras ejecutar el comando, Azure extrae el ZIP en el directorio wwwroot de la función.
+Verificación: Una vez completado, la función debe reiniciarse automáticamente. Se puede verificar en el portal de Azure, en la sección Functions → pushStaging, donde debe aparecer activa. Allí también se puede obtener la clave de función (en la sección Keys del portal, o mediante Azure CLI). Como la función tiene authLevel: function, habrá al menos una clave predeterminada (default). Esta clave se incluye como parámetro ?code= al invocar la función desde el script (de otro modo dará 401 Unauthorized). Las capturas [10–13] muestran ejemplos de pruebas con Postman donde se observa el error 401 al omitir o usar mal la clave.
+Este procedimiento de Zip Deploy es el recomendado para desplegar funciones con Azure CLI o Cloud Shell, pues usa el servicio Kudu para descomprimir el paquete y sincronizar los desencadenadores de la función
+learn.microsoft.com
+learn.microsoft.com
+.
+Flujo completo y gestión de concurrencia
+El flujo de datos completo desde la hoja hasta Azure SQL es el siguiente:
+Usuario interactúa con la hoja: El usuario abre Google Sheets y pulsa “Refrescar Datos”. Apps Script captura el evento y llama a refrescarDatos().
+Solicitud a Azure Functions: refrescarDatos() hace un UrlFetchApp.fetch() al endpoint de la Function (https://<APP>.azurewebsites.net/api/pushStaging?code=<clave>). Se envía el correo del usuario u otros filtros si aplica.
+Inserción en Azure SQL: La función pushStaging recibe el JSON, se conecta a la base de datos, e inserta o actualiza registros en la tabla Staging con transacciones ACID. Luego responde con éxito o error.
+Respuesta y visualización: Si la inserción fue correcta, Apps Script puede notificarlo al usuario. Para refrescar, el script podría volver a llamar al mismo endpoint para leer datos o asumimos que “Actualizar” realiza el insert y luego podría invocarse de nuevo “Refrescar” para ver los cambios confirmados.
+Base de datos ACID: Azure SQL Server garantiza propiedades ACID, por lo que cada operación de inserción es atómica e aislada. Incluso si varios usuarios envían datos al mismo tiempo, la base de datos los procesará como transacciones independientes sin corromper la consistencia
+geeksforgeeks.org
+. Las restricciones de clave primaria (p.ej. en id) evitan duplicados, y el aislamiento de transacciones asegura que un commit completo se vea sólo cuando todos los pasos se realicen correctamente
+geeksforgeeks.org
+.
+Concurrencia en Apps Script: Para evitar que dos usuarios en Google Sheets intenten modificar datos simultáneamente (lo que podría causar llamadas HTTP al mismo tiempo o lecturas inconsistentes), el script utiliza LockService de Apps Script. Por ejemplo, LockService.getDocumentLock() bloquea la hoja durante la operación; si otro usuario intenta ejecutar la misma función antes de que termine, la petición de lock fallará y el script puede informar que espere
+developers.google.com
+. Esto previene colisiones en el cliente de Sheets cuando varios editores usan el visor al mismo tiempo. En resumen, se logra la integridad usando bloqueo de script en el cliente y transacciones en el servidor.
+En síntesis, el sistema garantiza integridad de datos manejando la concurrencia en ambos extremos: Google Apps Script previene accesos simultáneos con LockService
+developers.google.com
+, mientras que Azure SQL impone ACID sobre las transacciones para mantener la consistencia
+geeksforgeeks.org
+. De esta forma, aunque haya múltiples editores, cada inserción o actualización de registro es transaccional y aislada, y la aplicación web actúa como capa de presentación temporal sin almacenar los datos localmente.
 
 ## Resumen
 
