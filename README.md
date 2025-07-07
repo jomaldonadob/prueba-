@@ -312,6 +312,131 @@ El repositorio **`prueba--main`** (cuyo contenido se adjunta en el ZIP proporcio
   * *Nota:* El código incluye un fragmento posterior inacabado (`// pushStaging ya la tienes; añade esto en pushStaging/index.js o en un a...`), que parece ser un comentario instructivo no ejecutable. No afecta la función principal descrita.
 
 En conjunto, **`index.js`** implementa la lógica del endpoint `pushStaging`: recibe datos de una petición HTTP, se conecta a Azure SQL, inserta en la tabla `Staging` y retorna el resultado. Al desplegar este código en Azure Functions, se crea la API REST que la hoja de Google Apps Script puede invocar.
+A continuación tienes la explicación detallada de la función **`pushStaging`** que está desplegada en Azure Functions, junto con el uso de las **variables de entorno** para la conexión a la base de datos.
+
+---
+
+## Código de la Azure Function `pushStaging`
+
+```javascript
+const sql = require('mssql');
+
+module.exports = async function (context, req) {
+  // Leer credenciales de Application Settings
+  const config = {
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    server: process.env.DB_SERVER,
+    database: process.env.DB_NAME,
+    options: {
+      encrypt: true,
+      trustServerCertificate: false
+    }
+  };
+
+  try {
+    // 1) Conectar a Azure SQL usando la configuración anterior
+    await sql.connect(config);
+
+    // 2) Extraer los datos que vienen en el cuerpo de la petición HTTP POST
+    const { id, item, cost, owner_email } = req.body;
+
+    // 3) Ejecutar un INSERT parametrizado para evitar inyección SQL
+    await sql.query`
+      INSERT INTO dbo.Staging (id, item, cost, owner_email, status)
+      VALUES (${id}, ${item}, ${cost}, ${owner_email}, 'NEW')
+    `;
+
+    // 4) Responder al cliente con éxito
+    context.res = {
+      status: 200,
+      body: "Inserción exitosa"
+    };
+
+  } catch (err) {
+    // 5) En caso de error, registrar y devolver 500
+    context.log.error(err);
+    context.res = {
+      status: 500,
+      body: "Error: " + err.message
+    };
+
+  } finally {
+    // 6) Cerrar siempre la conexión al terminar
+    await sql.close();
+  }
+};
+```
+
+### Línea por línea
+
+1. **`const sql = require('mssql');`**
+   Importa la librería oficial de Microsoft para conectarse a SQL Server desde Node.js.
+
+2. **`module.exports = async function (context, req) { … }`**
+   Define la función HTTP-trigger que Azure invoqua cuando recibe solicitudes en la ruta `/api/pushStaging`.
+
+   * `context` permite escribir logs y construir la respuesta.
+   * `req` contiene la petición HTTP, incluidos `req.body` (el JSON enviado).
+
+3. **`const config = { … }`**
+   Lee las credenciales de conexión **desde las variables de entorno** de la Function App:
+
+   * **`DB_USER`**, **`DB_PASS`**, **`DB_SERVER`**, **`DB_NAME`**
+     Estas claves se configuran en el portal de Azure bajo **Configuración de aplicación → Variables de entorno**, tal como se muestra en tu captura. Nunca aparecen hardcodeadas en el código; así proteges tus credenciales.
+
+4. **`await sql.connect(config);`**
+   Abre la conexión a Azure SQL Database usando `config`. Gracias a `encrypt: true`, la comunicación se hace por TLS.
+
+5. **`const { id, item, cost, owner_email } = req.body;`**
+   Extrae las propiedades `id`, `item`, `cost` y `owner_email` del JSON enviado por Apps Script (o quien invoque la función).
+
+6. **`` await sql.query` INSERT INTO dbo.Staging …` ``**
+   Ejecuta un **INSERT parametrizado**. Los valores interpolados con `${…}` se envían de forma segura, evitando inyección de SQL.
+
+7. **`context.res = { status: 200, body: "Inserción exitosa" };`**
+   Si todo va bien, responde con código HTTP 200 y un mensaje simple.
+
+8. **Bloque `catch(err)`**
+   Si ocurre cualquier excepción (fallo de conexión, error en la consulta, JSON mal formado…), se registra en los logs (`context.log.error(err)`) y se responde con código 500 y el mensaje de error.
+
+9. **Bloque `finally`**
+   Sea cual sea el resultado, antes de salir se **cierra la conexión** con `await sql.close()`. Esto evita fugas de conexión en el pool de `mssql`.
+
+---
+
+### Variables de entorno en Azure
+
+En el portal de Azure, dentro de tu Function App **probando22**, verás en **Configuración de aplicación → Variables de entorno** algo como:
+
+| Nombre                                  | Valor                                     |
+| --------------------------------------- | ----------------------------------------- |
+| DB\_USER                                | jomaldonadob@…                            |
+| DB\_PASS                                | Maldo20774.                               |
+| DB\_SERVER                              | pruebas-jomaldonadob.database.windows.net |
+| DB\_NAME                                | mi-sql-server-appsheet                    |
+| AzureWebJobsStorage                     | …                                         |
+| APPLICATIONINSIGHTS\_CONNECTION\_STRING | …                                         |
+| …                                       | …                                         |
+
+* **DB\_USER, DB\_PASS, DB\_SERVER, DB\_NAME**
+  Se usan en `process.env.*` para armar `config`.
+* **AzureWebJobsStorage** y **APPLICATIONINSIGHTS\_CONNECTION\_STRING**
+  Son requeridas por Azure Functions para su almacenamiento interno y telemetría.
+
+Al mantener las credenciales fuera del código (en variables de entorno), garantizas que no se filtren ni queden en tu repositorio. Cualquier cambio de contraseña o servidor se hace sólo en la configuración de la aplicación, sin tocar el código.
+
+---
+
+### Resumen de la función `pushStaging`
+
+1. **Recibe** una petición HTTP POST con un JSON `{ id, item, cost, owner_email }`.
+2. **Usa** credenciales seguras (variables de entorno) para conectarse a Azure SQL.
+3. **Inserta** el registro en la tabla `dbo.Staging`, marcándolo con estado `'NEW'`.
+4. **Devuelve** un mensaje de éxito o el detalle del error.
+5. **Cierra** siempre la conexión al terminar para liberar recursos.
+
+Esta función es el **endpoint** al que llama tu Apps Script (desde Google Sheets) para persistir datos en Azure SQL, y forma la pieza central de la capa de backend en la arquitectura.
 
 ## Despliegue a Azure Functions desde Cloud Shell
 
